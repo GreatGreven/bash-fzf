@@ -5,6 +5,31 @@
 # Date       : 2025-09-24
 #########################################################################
 
+##### VARIALBES #####
+
+readarray -t ORIGINAL_INPUT
+CANDIDATE_LIST=( "${ORIGINAL_INPUT[@]}" )
+QUERY_STRING=""
+shopt -s checkwinsize
+# this line is to ensure LINES and COLUMNS are set
+(:)
+DISPLAY_INTERVAL="$((LINES - 2))"
+PIPE="/tmp/$0.$$"
+
+##### FUNCTIONS #####
+
+end() {
+    local exit_code="$1"
+    [[ -f "$PIPE" ]] && rm --recursive --force "$PIPE"
+    unset_terminal_ui
+    exit "$exit_code"
+}
+
+fatal() {
+    local message="$1"
+    printf "\e[31m%s\e[0m" "$message"
+    end 2
+}
 set_alternate_screen_buffer() {
     printf "\e[?1049h" >&3
 }
@@ -17,7 +42,7 @@ set_scroll_margin() {
     printf "\e[H" >&3   # set cursor top left
     printf "\e[0J" >&3  # clear screen
     printf "\e7" >&3    # save cursor pos
-    printf "\e[%d;%dr" "0" "$((LINES - 2))" >&3 # set scroll margin top and bottom
+    printf "\e[%d;%dr" "0" "$DISPLAY_INTERVAL" >&3 # set scroll margin top and bottom
     printf "\e8" >&3    # restore saved cursor pos
 }
 
@@ -29,28 +54,142 @@ unset_scroll_margin() {
     printf "\e8" >&3    # restore saved cursor pos
 }
 
-readarray -t original_input
-exec 3<> "$TTY" # open file descriptor to terminal so STDOUT can be clean for final output
-shopt -s checkwinsize
-# this line is to ensure LINES and COLUMNS are set
-(:)
+print_divider() {
+    printf "\e[%d;%dH" "$((LINES - 1))" "0" >&3
+    eval printf -- "%0.s=" "{1..$COLUMNS}" >&3
+}
+
+print_prompt() {
+    print_divider
+    printf "\e[%d;%dH" "$LINES" "0" >&3
+    printf " > %s\e[0K" "$QUERY_STRING" >&3
+}
+
+print_candidate_list_in_scroll_margin() {
+    printf "\e[H" >&3
+    local i blank_count=$((DISPLAY_INTERVAL - ${#CANDIDATE_LIST[@]}))
+    # echo $DISPLAY_INTERVAL
+    # echo ${#CANDIDATE_LIST[@]}
+    # echo "$blank_count"
+    for ((i=0; i < blank_count; i++)); do
+        printf "\e[2K\n" >&3
+    done
+    printf "%s\e[0K\n" "${CANDIDATE_LIST[@]}" >&3
+}
+
+draw_ui() {
+    print_candidate_list_in_scroll_margin
+    print_prompt
+}
 
 
-set_alternate_screen_buffer
-set_scroll_margin
-# print divider
-printf "\e[%d;%dH" "$((LINES - 1))" "0" >&3
-eval printf -- "%0.s=" "{1..$COLUMNS}" >&3
-# print in scroll margin
-printf "\e[H" >&3
-printf "%s\n" "${original_input[@]}" >&3
-# print in margin
-echo "$LINES" >&3
-echo "LINES=$LINES, COLUMNS=$COLUMNS" >&3
-printf "\e[%d;%dH" "$LINES" "0" >&3
-read -rs -n 1 -u 3 -p "Press any key to continue..." x
-echo "$x" >&3
-unset_scroll_margin
-restore_normal_screen_buffer
+set_terminal_ui() {
+    :
+    set_alternate_screen_buffer
+    set_scroll_margin
+}
 
+unset_terminal_ui() {
+    :
+    unset_scroll_margin
+    restore_normal_screen_buffer
+}
 
+filter() {
+    local candidate_list
+    for line in "${ORIGINAL_INPUT[@]}"; do
+        if [[ "$line" =~ $QUERY_STRING ]]; then
+            candidate_list+=( "$line" )
+        fi
+    done
+    CANDIDATE_LIST=( "${candidate_list[@]}" )
+    echo "query-done" >&4
+}
+
+read_keyboard_event_task() {
+    local escape=$'\e'
+    local linefeed=$'\n'
+    local space=$'\u20'
+    local backspace=$'\b'
+    local delete=$'\u7f'
+    local tab=$'\t'
+
+    while true; do
+        local data='' output=''
+        read -rsN1 data 2>/dev/null || return
+        # echo "data: $data" >&3
+        # printf "%s" "$data" | xxd >&3
+        case "$data" in
+            "$escape")
+                read -rsn2 data 2>/dev/null || return
+                # echo "data2: $data" >&3
+                # printf "%s" "$data" | xxd >&3
+                case "$data" in
+                    '[A') output="key-up";;
+                    '[B') output="key-down";;
+                    '[3') # delete key?
+                        read -rsn1 data 2>/dev/null
+                        [[ "$data" == "~" ]] && output="key-delete"
+                        ;;
+                esac
+                ;;
+            "$linefeed") output="key-enter";;
+            "$space") output="key-space";;
+            "$backspace"|"$delete") output="key-backspace";;
+            "$tab") output="key-tab";;
+            *) output="key-char $data";;
+        esac
+        if [[ -n "$output" ]]; then
+            echo "$output"
+        fi
+    done
+}
+
+main () {
+    ##### INITIALIZATION #####
+    trap "end 1" INT TERM EXIT
+    exec 3<> "$TTY" || fatal "No Terminal detected"
+    mkfifo "$PIPE" || fatal "Failed to create pipe: $PIPE"
+    exec 4<> "$PIPE" || fatal "Failed to open pipe: $PIPE"
+    set_terminal_ui
+
+    draw_ui
+    read_keyboard_event_task <&3 >&4 &
+    while read -r event args; do
+        # echo "event: $event, args: $args"
+        case "$event" in
+            "key-enter")        # pick selected
+                ;;
+            "key-up")           # move up selected
+                ;;
+            "key-down")         # move down selector
+                ;;
+            "key-tab")          # don't do anything... yet
+                ;;
+            "key-backspace")    # remove previous char in query string
+                [[ ${#QUERY_STRING} -gt 0 ]] \
+                    && { QUERY_STRING="${QUERY_STRING::-1}" \
+                    || fatal "Failed to backspace on string '$QUERY_STRING'"; }
+                filter
+                ;;
+            "key-space")        # add space character to query string
+                QUERY_STRING+=" " \
+                    || fatal "Failed to add space to string '$QUERY_STRING'"
+                filter
+                ;;
+            "key-char")         # add char to query string
+                QUERY_STRING+="$args" \
+                    || fatal "Failed to add chars '$args' to string '$QUERY_STRING'"
+                filter
+                ;;
+            "query-done")       # done with search, now display them
+                ;;
+            *)
+                fatal "unknown event: $event, args: $args"
+                ;;
+        esac
+        draw_ui
+    done <&4
+}
+
+main "$@"
