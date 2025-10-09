@@ -8,28 +8,39 @@
 ##### VARIALBES #####
 
 readarray -t ORIGINAL_INPUT
-CANDIDATE_LIST=( "${ORIGINAL_INPUT[@]}" )
+CANDIDATE_LIST_FILE="/tmp/$0.filter"
+printf "%s\n" "${ORIGINAL_INPUT[@]}" > "$CANDIDATE_LIST_FILE"
 QUERY_STRING=""
 shopt -s checkwinsize
 # this line is to ensure LINES and COLUMNS are set
 (:)
 DISPLAY_INTERVAL="$((LINES - 2))"
-PIPE="/tmp/$0.$$"
+EVENT_PIPE="/tmp/$0.event.$$"
+FILTER_TASK=
+PRINT_TASK=
 
 ##### FUNCTIONS #####
 
 end() {
     local exit_code="$1"
-    [[ -f "$PIPE" ]] && rm --recursive --force "$PIPE"
+    [[ -f "$EVENT_PIPE" ]] && rm --recursive --force "$EVENT_PIPE"
+    [[ -f "$CANDIDATE_LIST_FILE" ]] && rm --recursive --force "$CANDIDATE_LIST_FILE"
     unset_terminal_ui
     exit "$exit_code"
 }
 
+debug() {
+    local lines=( "$@" )
+    printf "%s\n" "${lines[@]}" >> debug.log
+}
+
 fatal() {
     local message="$1"
+    debug "\e[31m$message\e[0m"
     printf "\e[31m%s\e[0m" "$message"
     end 2
 }
+
 set_alternate_screen_buffer() {
     printf "\e[?1049h" >&3
 }
@@ -66,43 +77,79 @@ print_prompt() {
 }
 
 print_candidate_list_in_scroll_margin() {
+    local i candidate_list
+    readarray -t candidate_list < "$CANDIDATE_LIST_FILE"
+    local display_end="${#candidate_list[@]}"
+    local blank_count=0
+    local display_start="$((display_end - DISPLAY_INTERVAL + 1))"
+
+    # If small list
+    if [[ "$DISPLAY_INTERVAL" -ge "$display_end" ]]; then
+        display_start=0
+        blank_count=$((DISPLAY_INTERVAL - display_end))
+    fi
+
     printf "\e[H" >&3
-    local i blank_count=$((DISPLAY_INTERVAL - ${#CANDIDATE_LIST[@]}))
-    # echo $DISPLAY_INTERVAL
-    # echo ${#CANDIDATE_LIST[@]}
-    # echo "$blank_count"
     for ((i=0; i < blank_count; i++)); do
         printf "\e[2K\n" >&3
     done
-    printf "%s\e[0K\n" "${CANDIDATE_LIST[@]}" >&3
+    printf "%s\e[0K\n" "${candidate_list[@]: $display_start:$display_end}" >&3
 }
 
-draw_ui() {
+initiate_print_ui_bg_task() {
+    # kill previous process if any
+    if [[ -n "$print_TASK" ]]; then
+        kill "$print_TASK"
+        print_TASK=
+    fi
+    # start new task
+    print_ui_bg_task &
+    print_TASK="$!"
+}
+
+print_ui_bg_task() {
+    print_ui
+    echo "print-ui-done" >&4
+}
+
+print_ui() {
     print_candidate_list_in_scroll_margin
     print_prompt
 }
 
-
 set_terminal_ui() {
-    :
     set_alternate_screen_buffer
     set_scroll_margin
 }
 
 unset_terminal_ui() {
-    :
     unset_scroll_margin
     restore_normal_screen_buffer
 }
 
 filter() {
+    # kill previous process if any
+    if [[ -n "$FILTER_TASK" ]]; then
+        kill "$FILTER_TASK"
+        FILTER_TASK=
+    fi
+    # start new task
+    filter_bg_task &
+    FILTER_TASK="$!"
+}
+
+filter_bg_task() {
     local candidate_list
+
+    # todo: set loading screen?
+
     for line in "${ORIGINAL_INPUT[@]}"; do
         if [[ "$line" =~ $QUERY_STRING ]]; then
             candidate_list+=( "$line" )
         fi
     done
-    CANDIDATE_LIST=( "${candidate_list[@]}" )
+    # CANDIDATE_LIST=( "${candidate_list[@]}" )
+    printf "%s\n" "${candidate_list[@]}" > "$CANDIDATE_LIST_FILE"
     echo "query-done" >&4
 }
 
@@ -113,6 +160,7 @@ read_keyboard_event_task() {
     local backspace=$'\b'
     local delete=$'\u7f'
     local tab=$'\t'
+    local end_of_transition_block=$'\u17'
 
     while true; do
         local data='' output=''
@@ -136,6 +184,7 @@ read_keyboard_event_task() {
             "$linefeed") output="key-enter";;
             "$space") output="key-space";;
             "$backspace"|"$delete") output="key-backspace";;
+            "$end_of_transition_block") output="key-backspace-block";;
             "$tab") output="key-tab";;
             *) output="key-char $data";;
         esac
@@ -149,12 +198,13 @@ main () {
     ##### INITIALIZATION #####
     trap "end 1" INT TERM EXIT
     exec 3<> "$TTY" || fatal "No Terminal detected"
-    mkfifo "$PIPE" || fatal "Failed to create pipe: $PIPE"
-    exec 4<> "$PIPE" || fatal "Failed to open pipe: $PIPE"
+    mkfifo "$EVENT_PIPE" || fatal "Failed to create pipe: $EVENT_PIPE"
+    exec 4<> "$EVENT_PIPE" || fatal "Failed to open pipe: $EVENT_PIPE"
     set_terminal_ui
 
-    draw_ui
+    print_ui
     read_keyboard_event_task <&3 >&4 &
+
     while read -r event args; do
         # echo "event: $event, args: $args"
         case "$event" in
@@ -172,6 +222,12 @@ main () {
                     || fatal "Failed to backspace on string '$QUERY_STRING'"; }
                 filter
                 ;;
+            "key-backspace-block")
+                [[ ${#QUERY_STRING} -gt 0 ]] \
+                    && { QUERY_STRING="${QUERY_STRING%%[^ ]*}" \
+                    || fatal "Failed to backspace on string '$QUERY_STRING'"; }
+                filter
+                ;;
             "key-space")        # add space character to query string
                 QUERY_STRING+=" " \
                     || fatal "Failed to add space to string '$QUERY_STRING'"
@@ -183,12 +239,17 @@ main () {
                 filter
                 ;;
             "query-done")       # done with search, now display them
+                FILTER_TASK=
+                print_candidate_list_in_scroll_margin
+                ;;
+            "print-ui-done")
+                PRINT_TASK=
                 ;;
             *)
                 fatal "unknown event: $event, args: $args"
                 ;;
         esac
-        draw_ui
+        print_prompt
     done <&4
 }
 
