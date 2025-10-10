@@ -18,6 +18,7 @@ DISPLAY_INTERVAL="$((LINES - 2))"
 EVENT_PIPE="/tmp/$0.event.$$"
 FILTER_TASK=
 PRINT_TASK=
+LOADING_TASK=
 
 ##### FUNCTIONS #####
 
@@ -51,18 +52,12 @@ restore_normal_screen_buffer() {
 
 set_scroll_margin() {
     printf "\e[H" >&3   # set cursor top left
-    printf "\e[0J" >&3  # clear screen
-    printf "\e7" >&3    # save cursor pos
     printf "\e[%d;%dr" "0" "$DISPLAY_INTERVAL" >&3 # set scroll margin top and bottom
-    printf "\e8" >&3    # restore saved cursor pos
 }
 
 unset_scroll_margin() {
     printf "\e[H" >&3   # set cursor top left
-    printf "\e7" >&3    # save cursor pos
     printf "\e[%d;%dr" "0" "$LINES" >&3 # set scroll margin top and bottom
-    printf "\e[0J" >&3  # clear screen
-    printf "\e8" >&3    # restore saved cursor pos
 }
 
 print_divider() {
@@ -74,6 +69,7 @@ print_prompt() {
     print_divider
     printf "\e[%d;%dH" "$LINES" "0" >&3
     printf " > %s\e[0K" "$QUERY_STRING" >&3
+    printf "\e[?25h" >&3 # make cursor visible
 }
 
 print_candidate_list_in_scroll_margin() {
@@ -96,15 +92,49 @@ print_candidate_list_in_scroll_margin() {
     printf "%s\e[0K\n" "${candidate_list[@]: $display_start:$display_end}" >&3
 }
 
+stop_loading_animation() {
+    if [[ -n "$LOADING_TASK" ]]; then
+        kill "$LOADING_TASK"
+        LOADING_TASK=
+    fi
+}
+
+loading_animation() {
+    stop_loading_animation
+
+    # start new task
+    loading_animation_bg_task &
+    LOADING_TASK="$!"
+}
+
+loading_animation_bg_task() {
+    local frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
+
+    # Clear scroll margin
+    local i
+    printf "\e[H" >&3 # set cursor position
+    printf "\e[?25l" >&3 # hide cursor
+    for ((i=0; i < DISPLAY_INTERVAL; i++)); do
+        printf "\e[2K\n" >&3
+    done
+
+    # loading animation loop
+    while true; do
+        for frame in "${frames[@]}"; do
+            printf "\e[H%s" "$frame" >&3
+            read -rt 0.1 _ < /dev/zero
+        done
+    done
+}
 initiate_print_ui_bg_task() {
     # kill previous process if any
-    if [[ -n "$print_TASK" ]]; then
-        kill "$print_TASK"
-        print_TASK=
+    if [[ -n "$PRINT_TASK" ]]; then
+        kill "$PRINT_TASK"
+        PRINT_TASK=
     fi
     # start new task
     print_ui_bg_task &
-    print_TASK="$!"
+    PRINT_TASK="$!"
 }
 
 print_ui_bg_task() {
@@ -141,7 +171,7 @@ filter() {
 filter_bg_task() {
     local candidate_list
 
-    # todo: set loading screen?
+    echo "set-loading" >&4
 
     for line in "${ORIGINAL_INPUT[@]}"; do
         if [[ "$line" =~ $QUERY_STRING ]]; then
@@ -240,10 +270,14 @@ main () {
                 ;;
             "query-done")       # done with search, now display them
                 FILTER_TASK=
+                stop_loading_animation
                 print_candidate_list_in_scroll_margin
                 ;;
             "print-ui-done")
                 PRINT_TASK=
+                ;;
+            "set-loading")
+                loading_animation
                 ;;
             *)
                 fatal "unknown event: $event, args: $args"
