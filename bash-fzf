@@ -19,7 +19,7 @@ EVENT_PIPE="/tmp/$0.event.$$"
 FILTER_TASK=
 PRINT_TASK=
 LOADING_TASK=
-SELECT_INDEX="$(( DISPLAY_INTERVAL - 1 ))"
+SELECT_INDEX="$DISPLAY_INTERVAL"
 
 ##### FUNCTIONS #####
 
@@ -90,14 +90,14 @@ loading_animation_bg_task() {
     done
 
     # loading animation loop
-    printf "\e[%d;%dH" "$((DISPLAY_INTERVAL))" 0 >&3 # set cursor position
     while true; do
         for frame in "${frames[@]}"; do
-            printf "%s\r" "$frame" >&3
-            read -rt 0.05 _ < /dev/zero
+            printf "\e[?25l\e[%d;%dH%s\r" "$((DISPLAY_INTERVAL))" 0 "$frame" >&3 # hide cursor, set cursor position and print frame
+            read -rt 0.05 _ < /dev/zero #sleep
         done
     done
 }
+
 initiate_print_ui_bg_task() {
     # kill previous process if any
     if [[ -n "$PRINT_TASK" ]]; then
@@ -119,6 +119,10 @@ print_selecter() {
     printf "\e[%d;%dH>" "$index" "0" >&3
 }
 
+unprint_selecter() {
+    local index="$1"
+    printf "\e[%d;%dH " "$index" "0" >&3
+}
 
 print_divider() {
     printf "\e[%d;%dH" "$((LINES - 1))" "0" >&3
@@ -126,10 +130,7 @@ print_divider() {
 }
 
 print_prompt() {
-    print_divider
-    printf "\e[%d;%dH" "$LINES" "0" >&3
-    printf " > %s\e[0K" "$QUERY_STRING" >&3
-    printf "\e[?25h" >&3 # make cursor visible
+    printf "\e[?25h\e[%d;%dH > %s\e[0K" "$LINES" "0" "$QUERY_STRING" >&3 # show cursor, set position and print query string
 }
 
 print_candidate_list_in_scroll_margin() {
@@ -155,6 +156,7 @@ print_candidate_list_in_scroll_margin() {
 print_ui() {
     print_candidate_list_in_scroll_margin
     print_selecter "$SELECT_INDEX"
+    print_divider
     print_prompt
 }
 
@@ -189,7 +191,6 @@ filter_bg_task() {
             candidate_list+=( "$line" )
         fi
     done
-    # CANDIDATE_LIST=( "${candidate_list[@]}" )
     printf "%s\n" "${candidate_list[@]}" > "$CANDIDATE_LIST_FILE"
     echo "query-done" >&4
 }
@@ -252,8 +253,16 @@ main () {
             "key-enter")        # pick selected
                 ;;
             "key-up")           # move up selected
+                line_count="$(wc -l < "$CANDIDATE_LIST_FILE")"
+                [[ "$SELECT_INDEX" -gt 0 ]] \
+                    && (( SELECT_INDEX > DISPLAY_INTERVAL - line_count + 1 )) \
+                    && unprint_selecter "$SELECT_INDEX" \
+                    && ((SELECT_INDEX--))
                 ;;
             "key-down")         # move down selector
+                [[ "$SELECT_INDEX" -lt "$DISPLAY_INTERVAL" ]] \
+                    && unprint_selecter "$SELECT_INDEX" \
+                    && ((SELECT_INDEX++))
                 ;;
             "key-tab")          # don't do anything... yet
                 ;;
@@ -281,8 +290,10 @@ main () {
                 ;;
             "query-done")       # done with search, now display them
                 FILTER_TASK=
+                SELECT_INDEX="$DISPLAY_INTERVAL"
                 stop_loading_animation
                 print_candidate_list_in_scroll_margin
+                print_divider
                 ;;
             "print-ui-done")
                 PRINT_TASK=
@@ -294,6 +305,8 @@ main () {
                 fatal "unknown event: $event, args: $args"
                 ;;
         esac
+        [[ -z "$LOADING_TASK" ]] \
+            && print_selecter "$SELECT_INDEX"
         print_prompt
     done <&4
 }
