@@ -195,6 +195,13 @@ filter_bg_task() {
     echo "query-done" >&4
 }
 
+strip_last_word() {
+    local words word_count
+    read -ra words <<< "$@"
+    word_count="${#words[@]}"
+    echo "${words[@]:0:$word_count-1}"
+}
+
 read_keyboard_event_task() {
     local escape=$'\e'
     local linefeed=$'\n'
@@ -269,14 +276,14 @@ main () {
             "key-backspace")    # remove previous char in query string
                 [[ ${#QUERY_STRING} -gt 0 ]] \
                     && { QUERY_STRING="${QUERY_STRING::-1}" \
-                    || fatal "Failed to backspace on string '$QUERY_STRING'"; }
-                filter
+                    || fatal "Failed to backspace on string '$QUERY_STRING'"; } \
+                    && filter
                 ;;
             "key-backspace-block")
                 [[ ${#QUERY_STRING} -gt 0 ]] \
-                    && { QUERY_STRING="${QUERY_STRING%%[^ ]*}" \
-                    || fatal "Failed to backspace on string '$QUERY_STRING'"; }
-                filter
+                    && { QUERY_STRING="$(strip_last_word "$QUERY_STRING")" \
+                    || fatal "Failed to backspace-block on string '$QUERY_STRING'"; } \
+                    && filter
                 ;;
             "key-space")        # add space character to query string
                 QUERY_STRING+=" " \
