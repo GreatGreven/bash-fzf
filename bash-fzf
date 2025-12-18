@@ -251,7 +251,10 @@ main () {
     exec 4<> "$EVENT_PIPE" || fatal "Failed to open pipe: $EVENT_PIPE"
     set_terminal_ui
 
+    # Initial print
     print_ui
+
+    # Read from terminal input and output to event pipe
     read_keyboard_event_task <&3 >&4 &
 
     while read -r event args; do
@@ -271,9 +274,9 @@ main () {
                     && unprint_selecter "$SELECT_INDEX" \
                     && ((SELECT_INDEX++))
                 ;;
-            "key-tab")          # don't do anything... yet
+            "key-tab") # don't do anything... yet
                 ;;
-            "key-backspace")    # remove previous char in query string
+            "key-backspace") # remove previous char in query string
                 [[ ${#QUERY_STRING} -gt 0 ]] \
                     && { QUERY_STRING="${QUERY_STRING::-1}" \
                     || fatal "Failed to backspace on string '$QUERY_STRING'"; } \
@@ -285,22 +288,22 @@ main () {
                     || fatal "Failed to backspace-block on string '$QUERY_STRING'"; } \
                     && filter
                 ;;
-            "key-space")        # add space character to query string
+            "key-space") # add space character to query string
                 QUERY_STRING+=" " \
                     || fatal "Failed to add space to string '$QUERY_STRING'"
                 filter
                 ;;
-            "key-char")         # add char to query string
+            "key-char") # add char to query string
                 QUERY_STRING+="$args" \
                     || fatal "Failed to add chars '$args' to string '$QUERY_STRING'"
                 filter
                 ;;
-            "query-done")       # done with search, now display them
+            "query-done") # done with search, now display them
                 FILTER_TASK=
                 SELECT_INDEX="$DISPLAY_INTERVAL"
                 stop_loading_animation
                 print_candidate_list_in_scroll_margin
-                print_divider
+                print_divider # reprint divider because sometimes it gets overwritten
                 ;;
             "print-ui-done")
                 PRINT_TASK=
